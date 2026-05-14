@@ -166,7 +166,6 @@ public:
                 << ": buffer must be of type '_io.BytesIO'";
             throw std::invalid_argument(err.str());
         }
-
         // std::cout << "Type: " << className << std::endl;
     }
     
@@ -264,17 +263,21 @@ public:
 };
 
 //
-// write file to dynamic buffer via io.BytesIO through Python Interface
+// write file to dynamic buffer via _io.BytesIO through Python Interface
 //
 
 class BufferOStream : public OStream
 {
+private:
     BytesIOInterface& bytesIO;
+    uint64_t bytesWritten_ = 0U;
+    uint64_t initialOffset = 0U;
 
 public:
     BufferOStream (BytesIOInterface& bytes_)
         : OStream ("<memory>")
         , bytesIO(bytes_)
+        , initialOffset(bytes_.tell())
     {
     }
 
@@ -286,43 +289,27 @@ public:
         // forward write request to BytesIO object
         py::bytes bytes_(c, n);
         bytesIO.write(bytes_);
+        bytesWritten_ += n;
     }
     
     void
     seekp (uint64_t pos) override
     {
-        bytesIO.seek(pos);
+        bytesIO.seek(pos + initialOffset);
     }
     
     uint64_t
     tellp () override 
     {
-        return bytesIO.tell();
+        return bytesIO.tell() - initialOffset;
+    }
+
+    uint64_t
+    bytesWritten ()
+    {
+        return bytesWritten_;
     }
 };
-
-// class BufferOStream : public OStream
-// {
-//     uint64_t streamptr = 0;
-
-// public:
-//     std::vector<char> data;
-//     MemOStream (uint64_t size) : OStream ("<memory>"), data (size) {}
-
-//     void
-//     write (const char c[], int n) override
-//     {
-//         if (n + streamptr > data.size ())
-//         {
-//             throw std::runtime_error ("attempt to write beyond preallocated memory");
-//         }
-//         memcpy (data.data () + streamptr, c, n);
-//         streamptr += n;
-//     }
-//     void     seekp (uint64_t pos) override { streamptr = pos; }
-//     uint64_t tellp () override { return streamptr; }
-// };
-
 
 PyFile::PyFile()
     : _header_only(false)
@@ -1311,7 +1298,11 @@ PyFile::write(const char* outfilename)
     filename = outfilename;
 }
 
-void
+//
+// Write the PyFile to the given _io.BytesIO object
+//
+
+uint64_t
 PyFile::writeBuffer(py::object& buffered)
 {
     BytesIOInterface biointerface (buffered);
@@ -1322,7 +1313,12 @@ PyFile::writeBuffer(py::object& buffered)
     writeChannels(outstream, headers);
 
     filename = "<memory>";
+    return bostream.bytesWritten();
 }
+
+//
+// helper method that creates the EXR headers
+//
 
 std::vector<Header>
 PyFile::writeHeaders()
@@ -1466,6 +1462,9 @@ PyFile::writeHeaders()
     return headers;
 }
 
+//
+// Helper method to write the channel data to the output file (either os file or dynamic buffer)
+//
 
 void
 PyFile::writeChannels(MultiPartOutputFile& outfile, const std::vector<Header>& headers)
@@ -3255,11 +3254,10 @@ PYBIND11_MODULE(OpenEXR, m)
              -------
              >>> f = OpenEXR.File("image.exr")
              >>> f.write("out.exr"))pbdoc")
-
-
         .def("write", &PyFile::writeBuffer,
              R"pbdoc(
              Write the File to the given buffer.
+             Returns the amount of written bytes.
 
              Parameters
              ----------
@@ -3270,6 +3268,6 @@ PYBIND11_MODULE(OpenEXR, m)
              -------
              >>> f = OpenEXR.File("image.exr")
              >>> i = io.BytesIO()
-             >>> f.write(io))pbdoc")
+             >>> bytes_written = f.write(i))pbdoc")
         ;
 }
