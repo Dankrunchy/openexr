@@ -99,6 +99,231 @@ namespace {
 
 #include "PyOpenEXR.h"
 
+//
+// IStream compliant reader that allows accessing python buffers
+//
+
+class BufferIStream : public IStream
+{
+    uint64_t              streamptr = 0;
+    const py::buffer_info binfo;
+
+public:
+    BufferIStream (const py::buffer& buffer)
+        : IStream ("<memory>")
+        , binfo (buffer.request())  // Request a buffer descriptor from Python
+    {}
+
+    bool isMemoryMapped () const override { return true; }
+
+    char* 
+    readMemoryMapped (int n) override
+    {
+        if (n + streamptr > binfo.size)
+        {
+            throw std::runtime_error ("attempt to read past end of file");
+        }
+        uint64_t oldStreamptr = streamptr;
+        streamptr += n;
+        return reinterpret_cast<char*> (binfo.ptr + oldStreamptr);
+    }
+
+    bool
+    read (char c[], int n) override
+    {
+        int bytesToRead =
+            std::min (n, static_cast<int> (binfo.size - streamptr));
+        memcpy (c, binfo.ptr + streamptr, bytesToRead);
+        streamptr += n;
+        return bytesToRead < n;
+    }
+
+    void seekg (uint64_t pos) override { streamptr = pos; }
+    uint64_t tellg () override { return streamptr; }
+};
+
+//
+// provide io.BytesIO interface
+//
+
+class BytesIOInterface
+{
+private:
+    py::object& objRef;
+
+public:
+    BytesIOInterface (py::object& obj)
+        : objRef(obj)
+    {
+        // check if object is actually a BytesIO object
+        py::handle type = objRef.get_type();
+        std::string className = type.attr("__name__").cast<std::string>();
+        
+        if (className != "BytesIO")
+        {
+            std::stringstream err;
+            err << "invalid buffer type '" << className << "'"
+                << ": buffer must be of type '_io.BytesIO'";
+            throw std::invalid_argument(err.str());
+        }
+
+        // std::cout << "Type: " << className << std::endl;
+    }
+    
+    #define _ARG_DECL(type, name) type name
+    #define _ARG_USE(type, name) name
+    #define ARG(type, name) type, name
+    // we need to ensure the main gil is held before accessing buffer through python!
+    #define GIL_ACQ py::gil_scoped_acquire gil
+
+    #define FORWARD_TO_PYTHON_FUNC(retType, funcName) \
+        retType funcName (void) { GIL_ACQ; return objRef.attr( #funcName )().cast<retType>(); }
+    #define FORWARD_TO_PYTHON_FUNC_1(retType, funcName, arg1) \
+        retType funcName (_ARG_DECL(arg1)) { GIL_ACQ; return objRef.attr( #funcName )(_ARG_USE(arg1)).cast<retType>(); }
+    #define FORWARD_TO_PYTHON_FUNC_2(retType, funcName, arg1, arg2) \
+        retType funcName (_ARG_DECL(arg1), _ARG_DECL(arg2)) { return objRef.attr( #funcName )(_ARG_USE(arg1), _ARG_USE(arg2)).cast<retType>(); }
+    #define FORWARD_TO_PYTHON_GET(retType, funcName) \
+        retType funcName (void) { GIL_ACQ; return objRef.attr( #funcName ).cast<retType>(); }
+
+    // Foward all BytesIO methods
+    FORWARD_TO_PYTHON_GET    (py::type,  __class__                                    );
+    FORWARD_TO_PYTHON_FUNC   (void,      __del__                                      );
+    FORWARD_TO_PYTHON_FUNC_1 (void,      __delattr__, ARG(const std::string&, name)   );
+    FORWARD_TO_PYTHON_GET    (py::dict,  __dict__                                     );
+    FORWARD_TO_PYTHON_FUNC   (void,      __dir__                                      );
+    FORWARD_TO_PYTHON_GET    (py::str,   __doc__                                      );
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __eq__,      ARG(py::object&, other)         );
+    FORWARD_TO_PYTHON_FUNC_1 (void,      __exit__,    ARG(int, val)                   );
+    FORWARD_TO_PYTHON_FUNC_1 (py::str,   __format__,  ARG(const std::string&, format) );
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __ge__,      ARG(py::object&, other)         );
+    FORWARD_TO_PYTHON_FUNC   (py::tuple, __getstate__                                 );
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __gt__,      ARG(py::object&, other)         );
+    FORWARD_TO_PYTHON_FUNC   (uint32_t,  __hash__                                     );
+    // ignore __init__
+    // ignore __init_subclass__
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __le__,  ARG(py::object&, other) );
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __lt__,  ARG(py::object&, other) );
+    FORWARD_TO_PYTHON_FUNC_1 (bool,      __ne__,  ARG(py::object&, other) );
+    // ignore __module__
+    // ignore __new__
+    // ignore __next__
+    // ignore __reduce__
+    // ignore __reduce_ex__
+    FORWARD_TO_PYTHON_FUNC   (py::str,    __repr__                                                               );
+    FORWARD_TO_PYTHON_FUNC_2 (py::str,    __setattr__,    ARG(const std::string&, name), ARG(py::object&, value) );
+    FORWARD_TO_PYTHON_FUNC_1 (py::str,    __setstate__,   ARG(py::tuple&, tuple)                                 );
+    FORWARD_TO_PYTHON_FUNC   (uint64_t,   __sizeof__                                                             );
+    FORWARD_TO_PYTHON_FUNC   (py::str,    __str__                                                                );
+    // ignore __subclasshook__
+    FORWARD_TO_PYTHON_FUNC (void,       _checkClosed    );
+    FORWARD_TO_PYTHON_FUNC (bool,       _checkReadable  );
+    FORWARD_TO_PYTHON_FUNC (bool,       _checkSeekable  );
+    FORWARD_TO_PYTHON_FUNC (bool,       _checkWritable  );
+    FORWARD_TO_PYTHON_FUNC (void,       close           );
+    FORWARD_TO_PYTHON_GET  (bool,       closed          );
+    // unsupported detach
+    // unsupported fileno
+    FORWARD_TO_PYTHON_FUNC (void,       flush       );
+    FORWARD_TO_PYTHON_FUNC (py::buffer, getbuffer   );
+    FORWARD_TO_PYTHON_FUNC (py::bytes,  getvalue    );
+    // TODO default size -1
+    FORWARD_TO_PYTHON_FUNC_1 (py::bytes,  read,   ARG(uint64_t, size) );
+    FORWARD_TO_PYTHON_FUNC_1 (py::bytes,  read1,  ARG(uint64_t, size) );
+    // ignore readinto
+    // ignore readinto1
+    FORWARD_TO_PYTHON_FUNC   (py::bytes,  readline                        );
+    FORWARD_TO_PYTHON_FUNC   (py::list,   readlines                       );
+    // TODO optional argument whence == 0 (allows relative modes of seek)
+    FORWARD_TO_PYTHON_FUNC_1 (uint64_t,   seek,       ARG(int64_t, pos)   );
+    FORWARD_TO_PYTHON_FUNC   (uint64_t,   tell                            );
+    // TODO default size == tell()
+    FORWARD_TO_PYTHON_FUNC_1 (uint64_t,   truncate,   ARG(uint64_t, size)     );
+    FORWARD_TO_PYTHON_FUNC_1 (uint64_t,   write,      ARG(py::bytes, bytes)   );
+    FORWARD_TO_PYTHON_FUNC_1 (void,       writelines, ARG(py::list, lines)    );
+
+    FORWARD_TO_PYTHON_FUNC (bool, readable);
+    FORWARD_TO_PYTHON_FUNC (bool, seekable);
+    FORWARD_TO_PYTHON_FUNC (bool, writable);
+
+    // FORWARD_TO_PYTHON_FUNC (BytesIOInterface, __enter__);
+    // FORWARD_TO_PYTHON_FUNC (BytesIOInterface, __iter__ );
+
+    py::object
+    __getattribute__ (const std::string& name)
+    {
+        return objRef.attr(name.c_str());
+    }
+
+    #undef _ARG_DECL
+    #undef _ARG_USE
+    #undef ARG
+    #undef FORWARD_TO_PYTHON_FUNC
+    #undef FORWARD_TO_PYTHON_FUNC_1
+    #undef FORWARD_TO_PYTHON_FUNC_2
+    #undef FORWARD_TO_PYTHON_GET
+};
+
+//
+// write file to dynamic buffer via io.BytesIO through Python Interface
+//
+
+class BufferOStream : public OStream
+{
+    BytesIOInterface& bytesIO;
+
+public:
+    BufferOStream (BytesIOInterface& bytes_)
+        : OStream ("<memory>")
+        , bytesIO(bytes_)
+    {
+    }
+
+    void
+    write (const char c[], int n) override
+    {
+        // acquire GIL scope earlier so we can safely create bytes_
+        py::gil_scoped_acquire gil;
+        // forward write request to BytesIO object
+        py::bytes bytes_(c, n);
+        bytesIO.write(bytes_);
+    }
+    
+    void
+    seekp (uint64_t pos) override
+    {
+        bytesIO.seek(pos);
+    }
+    
+    uint64_t
+    tellp () override 
+    {
+        return bytesIO.tell();
+    }
+};
+
+// class BufferOStream : public OStream
+// {
+//     uint64_t streamptr = 0;
+
+// public:
+//     std::vector<char> data;
+//     MemOStream (uint64_t size) : OStream ("<memory>"), data (size) {}
+
+//     void
+//     write (const char c[], int n) override
+//     {
+//         if (n + streamptr > data.size ())
+//         {
+//             throw std::runtime_error ("attempt to write beyond preallocated memory");
+//         }
+//         memcpy (data.data () + streamptr, c, n);
+//         streamptr += n;
+//     }
+//     void     seekp (uint64_t pos) override { streamptr = pos; }
+//     uint64_t tellp () override { return streamptr; }
+// };
+
+
 PyFile::PyFile()
     : _header_only(false)
 {
@@ -135,8 +360,6 @@ PyFile::PyFile(const py::dict& header, const py::dict& channels)
 }
 
 //
-// Read a PyFile from the given filename.
-//
 // Create a 'Part' for each part in the file, even single-part files. The API
 // has convenience methods for accessing the first part's header and
 // channels, which for single-part files appears as the file's data.
@@ -151,12 +374,9 @@ PyFile::PyFile(const py::dict& header, const py::dict& channels)
 // e.g. "left.R", "left.G", etc, the channel key is the prefix.
 //
 
-PyFile::PyFile(const std::string& filename, bool separate_channels, bool header_only)
-    : filename(filename),
-      _header_only(header_only),
-      _inputFile(std::make_unique<MultiPartInputFile>(filename.c_str()))
+void
+PyFile::initHelper(bool separate_channels)
 {
-
     for (int part_index = 0; part_index < _inputFile->parts(); part_index++)
     {
         const Header& header = _inputFile->header(part_index);
@@ -222,6 +442,33 @@ PyFile::PyFile(const std::string& filename, bool separate_channels, bool header_
         
         parts.append(py::cast<PyPart>(PyPart(P)));
     } // for parts
+}
+
+//
+// Read a PyFile from the given filename.
+// Creates Parts as defined in PyFile::initHelper
+//
+PyFile::PyFile(const py::str& filename, bool separate_channels, bool header_only)
+    : filename(filename),
+      _header_only(header_only),
+      _inputFile(std::make_unique<MultiPartInputFile>(static_cast<std::string>(filename).c_str()))
+{
+    initHelper(separate_channels);
+}
+
+//
+// Read a PyFile from the given buffer object instead of a file through the filename.
+// Creates Parts as defined in PyFile::initHelper
+//
+
+PyFile::PyFile(const py::buffer& buffer, bool separate_channels, bool header_only)
+    : filename(""),
+      _header_only(header_only)
+{    
+    BufferIStream bistream (buffer);
+    _inputFile = std::make_unique<MultiPartInputFile>(bistream);
+    
+    initHelper(separate_channels);
 }
 
 void
@@ -630,7 +877,7 @@ PyPart::writePixels(MultiPartOutputFile& outfile, const Box2i& dw) const
         auto C = c.second.cast<const PyChannel&>();
 
         auto pixelType = C.pixelType();
-            
+
         if (C.pixels.ndim() == 3)
         {
             //
@@ -700,8 +947,9 @@ PyPart::writePixels(MultiPartOutputFile& outfile, const Box2i& dw) const
     if (type() == EXR_STORAGE_SCANLINE)
     {
         OutputPart part(outfile, part_index);
-        part.setFrameBuffer (frameBuffer);
+        part.setFrameBuffer (frameBuffer); // FIXME crashes here
         {
+            // release GIL for potentially multi threaded pixel writing
             py::gil_scoped_release release;
             part.writePixels (height());
         }
@@ -1057,6 +1305,28 @@ PyFile::channels(int part_index)
 void
 PyFile::write(const char* outfilename)
 {
+    auto headers = writeHeaders();
+    MultiPartOutputFile outfile(outfilename, headers.data(), headers.size());
+    writeChannels(outfile, headers);
+    filename = outfilename;
+}
+
+void
+PyFile::writeBuffer(py::object& buffered)
+{
+    BytesIOInterface biointerface (buffered);
+    BufferOStream bostream (biointerface);
+
+    auto headers = writeHeaders();
+    MultiPartOutputFile outstream(bostream, headers.data(), headers.size());
+    writeChannels(outstream, headers);
+
+    filename = "<memory>";
+}
+
+std::vector<Header>
+PyFile::writeHeaders()
+{
     std::vector<Header> headers;
 
     for (size_t part_index = 0; part_index < parts.size(); part_index++)
@@ -1193,8 +1463,13 @@ PyFile::write(const char* outfilename)
         headers.push_back (header);
     }
     
-    MultiPartOutputFile outfile(outfilename, headers.data(), headers.size());
+    return headers;
+}
 
+
+void
+PyFile::writeChannels(MultiPartOutputFile& outfile, const std::vector<Header>& headers)
+{
     if (_header_only && _inputFile)
     {
         int numParts = _inputFile->parts();
@@ -1269,8 +1544,6 @@ PyFile::write(const char* outfilename)
                 throw std::runtime_error("invalid type");
         }
     }
-    
-    filename = outfilename;
 }
 
 //
@@ -1289,7 +1562,7 @@ py_cast(const py::object& object)
 }
 
 //
-// Helper routine to cast an objec to a type only if it's actually that type,
+// Helper routine to cast an object to a type only if it's actually that type,
 // since py::cast throws an runtime_error on unexpected type. This further cast
 // the resulting pointer to a second type.
 //
@@ -2832,7 +3105,7 @@ PYBIND11_MODULE(OpenEXR, m)
          >>> f.write("out.exr")
     )pbdoc")
         .def(py::init<>())
-        .def(py::init<std::string,bool,bool>(),
+        .def(py::init<py::str,bool,bool>(),
              py::arg("filename"),
              py::arg("separate_channels")=false,
              py::arg("header_only")=false,
@@ -2896,6 +3169,28 @@ PYBIND11_MODULE(OpenEXR, m)
              >>> P1 = OpenEXR.Part({}, {"Z" : Z1 })
              >>> f = OpenEXR.File([P0, P1])
             )pbdoc")
+        .def(py::init<py::buffer,bool,bool>(),
+             py::arg("buffer"),
+             py::arg("separate_channels")=false,
+             py::arg("header_only")=false,
+             R"pbdoc(
+             Initialize a File from a memory buffer using a bytes like object.
+
+             Parameters
+             ----------
+             buffer : memory
+                 An object supporting the buffer protocol that stores the image file.
+             separate_channels : bool
+                 If True, read each channel into a separate 2D numpy array
+                 if False (default), read pixel data into a single "RGB" or "RGBA" numpy array of dimension (height,width,3) or (height,width,4);
+             header_only : bool
+                 If True, read only the header metadata, not the image pixel data.
+
+             Example
+             -------
+             >>> b = pathlib.Path("image.exr").read_bytes()
+             >>> f = OpenEXR.File(b, separate_channels=False, header_only=False)
+             )pbdoc")
         .def("__enter__", &PyFile::__enter__)
         .def("__exit__", &PyFile::__exit__)
         .def_readwrite("filename", &PyFile::filename,
@@ -2949,7 +3244,7 @@ PYBIND11_MODULE(OpenEXR, m)
              )pbdoc")
         .def("write", &PyFile::write,
              R"pbdoc(
-             Write the File to the give file name.
+             Write the File to the given file name.
 
              Parameters
              ----------
@@ -2960,6 +3255,21 @@ PYBIND11_MODULE(OpenEXR, m)
              -------
              >>> f = OpenEXR.File("image.exr")
              >>> f.write("out.exr"))pbdoc")
+
+
+        .def("write", &PyFile::writeBuffer,
+             R"pbdoc(
+             Write the File to the given buffer.
+
+             Parameters
+             ----------
+             buffer : BytesIO
+                 The buffered writer.
+
+             Example
+             -------
+             >>> f = OpenEXR.File("image.exr")
+             >>> i = io.BytesIO()
+             >>> f.write(io))pbdoc")
         ;
 }
-

@@ -18,7 +18,8 @@ class PyFile
 {
 public:
     PyFile();
-    PyFile(const std::string& filename, bool separate_channels = false, bool header_only = false);
+    PyFile(const py::str& filename, bool separate_channels = false, bool header_only = false);
+    PyFile(const py::buffer& buffer, bool separate_channels = false, bool header_only = false);
     PyFile(const py::dict& header, const py::dict& channels);
     PyFile(const py::list& parts);
 
@@ -29,6 +30,7 @@ public:
     py::dict&    channels(int part_index = 0);
 
     void         write(const char* filename);
+    void         writeBuffer(py::object& buffered);
     
     std::string  filename;
     py::list     parts;
@@ -43,6 +45,12 @@ protected:
     void         insertAttribute(Header& header,
                                  const std::string& name,
                                  const py::object& object);
+
+private:
+    std::vector<Header> writeHeaders();
+    void                writeChannels(MultiPartOutputFile& outfile,
+                                      const std::vector<Header>& headers);
+    void                initHelper(bool separate_channels);
 
 };
 
