@@ -143,8 +143,11 @@ public:
 };
 
 //
-// provide io.BytesIO interface
+// provide _io.BytesIO interface
 //
+
+// we need to ensure the main gil is held before accessing python objects!
+#define GIL_ACQ py::gil_scoped_acquire gil
 
 class BytesIOInterface
 {
@@ -172,19 +175,32 @@ public:
     #define _ARG_DECL(type, name) type name
     #define _ARG_USE(type, name) name
     #define ARG(type, name) type, name
-    // we need to ensure the main gil is held before accessing buffer through python!
-    #define GIL_ACQ py::gil_scoped_acquire gil
-
+    
     #define FORWARD_TO_PYTHON_FUNC(retType, funcName) \
-        retType funcName (void) { GIL_ACQ; return objRef.attr( #funcName )().cast<retType>(); }
-    #define FORWARD_TO_PYTHON_FUNC_1(retType, funcName, arg1) \
-        retType funcName (_ARG_DECL(arg1)) { GIL_ACQ; return objRef.attr( #funcName )(_ARG_USE(arg1)).cast<retType>(); }
-    #define FORWARD_TO_PYTHON_FUNC_2(retType, funcName, arg1, arg2) \
-        retType funcName (_ARG_DECL(arg1), _ARG_DECL(arg2)) { return objRef.attr( #funcName )(_ARG_USE(arg1), _ARG_USE(arg2)).cast<retType>(); }
-    #define FORWARD_TO_PYTHON_GET(retType, funcName) \
-        retType funcName (void) { GIL_ACQ; return objRef.attr( #funcName ).cast<retType>(); }
+        retType funcName (void) { \
+            GIL_ACQ; \
+            return objRef.attr( #funcName )().cast<retType>(); \
+        }
 
-    // Foward all BytesIO methods
+    #define FORWARD_TO_PYTHON_FUNC_1(retType, funcName, arg1) \
+        retType funcName (_ARG_DECL(arg1)) { \
+            GIL_ACQ; \
+            return objRef.attr( #funcName )(_ARG_USE(arg1)).cast<retType>(); \
+        }
+        
+    #define FORWARD_TO_PYTHON_FUNC_2(retType, funcName, arg1, arg2) \
+        retType funcName (_ARG_DECL(arg1), _ARG_DECL(arg2)) { \
+            GIL_ACQ; \
+            return objRef.attr( #funcName )(_ARG_USE(arg1), _ARG_USE(arg2)).cast<retType>(); \
+        }
+
+    #define FORWARD_TO_PYTHON_GET(retType, funcName) \
+        retType funcName (void) { \
+            GIL_ACQ; \
+            return objRef.attr( #funcName ).cast<retType>(); \
+        }
+
+    // Foward all (relevant) BytesIO methods
     FORWARD_TO_PYTHON_GET    (py::type,  __class__                                    );
     FORWARD_TO_PYTHON_FUNC   (void,      __del__                                      );
     FORWARD_TO_PYTHON_FUNC_1 (void,      __delattr__, ARG(const std::string&, name)   );
@@ -284,10 +300,10 @@ public:
     void
     write (const char c[], int n) override
     {
-        // acquire GIL scope earlier so we can safely create bytes_
-        py::gil_scoped_acquire gil;
-        // forward write request to BytesIO object
+        // acquire GIL scope earlier so we can safely create `bytes_`
+        GIL_ACQ;
         py::bytes bytes_(c, n);
+        // forward write request to BytesIO object
         bytesIO.write(bytes_);
         bytesWritten_ += n;
     }
@@ -310,6 +326,7 @@ public:
         return bytesWritten_;
     }
 };
+#undef GIL_ACQ
 
 //
 // OStream compliant buffer writer, entirely within C++ compared to BufferedOstream
