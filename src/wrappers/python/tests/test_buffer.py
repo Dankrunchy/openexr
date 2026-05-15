@@ -83,15 +83,46 @@ class TestBuffer(unittest.TestCase):
         compare_files(fileEXR, bufferEXR)
         
     
-    def test_buffer_write_rgba(self):
-        # write bytes to buffer instead of file
+    def test_buffered_write_rgba(self):
+        # write bytes to buffered writer instead of file
         fileEXR = OpenEXR.File(test_exr_path)
-        buffer = BytesIO()
-        fileEXR.write(buffer)
+        buffered = BytesIO()
+        fileEXR.write(buffered)
 
         # assert that we can load from buffer again
-        bufferEXR = OpenEXR.File(buffer.getvalue()) # alternatively buffer.seek(0) and then buffer.read()
+        bufferEXR = OpenEXR.File(buffered.getvalue()) # alternatively buffer.seek(0) and then buffer.read()
         compare_files(fileEXR, bufferEXR)
+
+
+    def test_buffer_write_rgba(self):
+        # write bytes to allocated buffer instead of file
+        fileEXR = OpenEXR.File(test_exr_path)
+        buffer = np.empty(1 << 22, dtype=np.uint8)  # allocate 4MiB
+        bytes_written = fileEXR.write(buffer)
+
+        # assert that we can load from buffer again
+        bufferEXR = OpenEXR.File(buffer)
+        compare_files(fileEXR, bufferEXR)
+
+
+    def test_buffered_chain_write_rgba(self):
+        # write to and load from concatenated byte stream
+        fileEXR = OpenEXR.File(test_exr_path)
+        buffer = np.empty(1 << 22, dtype=np.uint8)  # allocate 4MiB
+        buf_size = fileEXR.write(buffer)
+
+        # concatenate another file to stream
+        fileEXR.write(buffer[buf_size:])
+
+        # assert that we can load from buffer again
+        # load first file
+        buffer1EXR = OpenEXR.File(buffer)
+        compare_files(fileEXR, buffer1EXR)
+        
+        # load second file
+        buffer2EXR = OpenEXR.File(buffer[buf_size:])
+        compare_files(buffer1EXR, buffer2EXR)
+
 
     def test_buffer_chain_write_rgba(self):
         # write to and load from concatenated byte stream
@@ -122,23 +153,28 @@ class TestBuffer(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             f = OpenEXR.File(b'invalid buffer content')
         
+        # valid type, invalid content
         with self.assertRaises(RuntimeError):
-            f = OpenEXR.File(np.arange(100)) # valid type, invalid content
+            f = OpenEXR.File(np.arange(100))
 
+        # invalid filetype
         with self.assertRaises(TypeError):
-            f = OpenEXR.File(BytesIO)   # invalid filetype
+            f = OpenEXR.File(BytesIO)
 
         fileEXR = OpenEXR.File(test_exr_path)
-        buffer = np.empty(1 << 20, dtype=np.uint8)
-        with self.assertRaises(ValueError):
-            fileEXR.write(buffer)   # expects BytesIO, not preallocated buffer
+        # buffer size too small
+        buffer = np.empty(1 << 4, dtype=np.uint8)
+        with self.assertRaises(RuntimeError):
+            fileEXR.write(buffer)
         
+        # no exclusive write access possible (SHARED)
         buffer = BytesIO()
         mem    = buffer.getbuffer() # locks the underlying data structure
         with self.assertRaises(BufferError):
             fileEXR.write(buffer)
 
         # writing must work again after releasing lock
+        # SHARED -> EXCLUSIVE
         del mem
         fileEXR.write(buffer)
         

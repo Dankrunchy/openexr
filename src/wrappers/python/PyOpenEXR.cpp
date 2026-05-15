@@ -121,7 +121,7 @@ public:
     {
         if (n + streamptr > binfo.size)
         {
-            throw std::runtime_error ("attempt to read past end of file");
+            throw std::runtime_error ("attempt to read past end of allocated buffer");
         }
         uint64_t oldStreamptr = streamptr;
         streamptr += n;
@@ -266,7 +266,7 @@ public:
 // write file to dynamic buffer via _io.BytesIO through Python Interface
 //
 
-class BufferOStream : public OStream
+class BufferedOStream : public OStream
 {
 private:
     BytesIOInterface& bytesIO;
@@ -274,7 +274,7 @@ private:
     uint64_t initialOffset = 0U;
 
 public:
-    BufferOStream (BytesIOInterface& bytes_)
+    BufferedOStream (BytesIOInterface& bytes_)
         : OStream ("<memory>")
         , bytesIO(bytes_)
         , initialOffset(bytes_.tell())
@@ -309,6 +309,41 @@ public:
     {
         return bytesWritten_;
     }
+};
+
+//
+// OStream compliant buffer writer, entirely within C++ compared to BufferedOstream
+//
+
+class BufferOStream : public OStream
+{
+    uint64_t              streamptr     = 0;
+    uint64_t              bytesWritten_ = 0U;
+    const py::buffer_info binfo;
+
+public:
+    BufferOStream (py::buffer& buffer)
+        : OStream ("<memory>")
+        , binfo (buffer.request())  // Request a buffer descriptor from Python
+    {}
+
+    void
+    write (const char c[], int n) override
+    {
+        if (n + streamptr > binfo.size)
+        {
+            throw std::runtime_error ("attempt to write past end of allocated buffer");
+        }
+        memcpy (binfo.ptr + streamptr, c, n);
+        streamptr += n;
+        bytesWritten_ += n;
+    }
+    
+    void seekp (uint64_t pos) override { streamptr = pos; }
+    
+    uint64_t tellp () override { return streamptr; }
+
+    uint64_t bytesWritten () { return bytesWritten_; }
 };
 
 PyFile::PyFile()
@@ -1299,14 +1334,32 @@ PyFile::write(const char* outfilename)
 }
 
 //
+// Write the PyFile to the allocated memory
+// Throws runtime error if size is not sufficient
+//
+
+uint64_t
+PyFile::writeBuffer(py::buffer& buffer)
+{
+    BufferOStream bostream (buffer);
+
+    auto headers = writeHeaders();
+    MultiPartOutputFile outstream(bostream, headers.data(), headers.size());
+    writeChannels(outstream, headers);
+
+    filename = "<memory>";
+    return bostream.bytesWritten();
+}
+
+//
 // Write the PyFile to the given _io.BytesIO object
 //
 
 uint64_t
-PyFile::writeBuffer(py::object& buffered)
+PyFile::writeBuffered(py::object& buffered)
 {
     BytesIOInterface biointerface (buffered);
-    BufferOStream bostream (biointerface);
+    BufferedOStream bostream (biointerface);
 
     auto headers = writeHeaders();
     MultiPartOutputFile outstream(bostream, headers.data(), headers.size());
@@ -3257,6 +3310,21 @@ PYBIND11_MODULE(OpenEXR, m)
         .def("write", &PyFile::writeBuffer,
              R"pbdoc(
              Write the File to the given buffer.
+             Returns the amount of written bytes.
+
+             Parameters
+             ----------
+             buffer : memory
+                 The allocated memory.
+
+             Example
+             -------
+             >>> f = OpenEXR.File("image.exr")
+             >>> b = np.zeros(1 << 20, dtype=np.uint8) # allocate 1MiB
+             >>> bytes_written = f.write(b))pbdoc")
+        .def("write", &PyFile::writeBuffered,
+             R"pbdoc(
+             Write the File to the given dynamic buffered writer.
              Returns the amount of written bytes.
 
              Parameters

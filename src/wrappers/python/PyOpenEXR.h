@@ -30,7 +30,8 @@ public:
     py::dict&    channels(int part_index = 0);
 
     void         write(const char* filename);
-    uint64_t     writeBuffer(py::object& buffered);
+    uint64_t     writeBuffer(py::buffer& buffer);
+    uint64_t     writeBuffered(py::object& buffered);
     
     std::string  filename;
     py::list     parts;
